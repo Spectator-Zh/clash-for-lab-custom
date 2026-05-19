@@ -18,6 +18,38 @@
 
 Clash for Lab 是专为实验室环境设计的科学上网解决方案，基于 [clash-for-linux-install](https://github.com/nelvko/clash-for-linux-install) 项目进行二次开发。
 
+## 本仓库相对上游的新增改动
+
+这份仓库在原有 `clash-for-lab` 基础上，额外补了几项更适合无 root 服务器长期使用的改动：
+
+- 新增 `clash reload`
+  - 支持通过 Mihomo API 热重载当前 `runtime.yaml`
+  - 如果 API 热重载失败，会自动回退到 `clash restart`
+- 新增 `clash mihomo version`
+  - 直接查看当前正在使用的 Mihomo 内核版本
+- 新增 `clash mihomo update`
+  - 支持手动升级 Mihomo 内核
+  - 支持更新到最新稳定版、指定版本，或使用自定义下载地址
+- 默认内核资源升级
+  - 仓库内置离线内核包已从旧版 `v1.19.2` 升级到 `v1.19.25`
+  - 安装脚本缺少本地内核包时，也会优先下载默认稳定版 Mihomo
+- 状态输出增强
+  - `clash status` 会直接显示当前 Mihomo 内核版本
+
+## 这些改动解决了什么问题
+
+- 解决旧内核不支持新协议的问题
+  - 旧版 `mihomo v1.19.2` 对 `anytls` 支持不够，容易出现配置校验失败或无法启动
+  - 升级到较新的 Mihomo 后，这类订阅可以正常验证和运行
+- 解决“每次换内核都要手工替换二进制”的问题
+  - 现在可以直接用 `clash mihomo update` 统一完成下载、替换和可选重启
+- 解决“改了配置只能整进程重启”的问题
+  - 现在可以先尝试 `clash reload` 做热重载，减少中断
+- 解决“仓库默认行为和当前实际用法不一致”的问题
+  - 现在安装默认就是 Mihomo 路线，不再优先落回旧的 Clash Premium 内核
+- 解决“回头看服务器时不知道自己跑的是什么版本”的问题
+  - `clash status` 和 `clash mihomo version` 都能直接确认当前内核状态
+
 ### 为什么选择 Clash for Lab？
 
 实验室用户通常面临以下困难：
