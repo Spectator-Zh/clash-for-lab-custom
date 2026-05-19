@@ -6,6 +6,8 @@
 
 URL_GH_PROXY='https://ghfast.top'
 URL_CLASH_UI="http://board.zash.run.place"
+MIHOMO_REPO='MetaCubeX/mihomo'
+MIHOMO_DEFAULT_VERSION='v1.19.25'
 
 SCRIPT_BASE_DIR='./script'
 
@@ -182,22 +184,22 @@ _set_rc() {
 # 默认集成、安装mihomo内核
 # 移除/删除mihomo：下载安装clash内核
 function _get_kernel() {
-    [ -f "$ZIP_CLASH" ] && {
-        ZIP_KERNEL=$ZIP_CLASH
-        BIN_KERNEL=$BIN_CLASH
-    }
-
     [ -f "$ZIP_MIHOMO" ] && {
         ZIP_KERNEL=$ZIP_MIHOMO
         BIN_KERNEL=$BIN_MIHOMO
     }
 
-    [ ! -f "$ZIP_MIHOMO" ] && [ ! -f "$ZIP_CLASH" ] && {
-        local arch=$(uname -m)
-        _failcat "${ZIP_BASE_DIR}：未检测到可用的内核压缩包"
-        _download_clash "$arch"
+    [ -z "$ZIP_KERNEL" ] && [ -f "$ZIP_CLASH" ] && {
         ZIP_KERNEL=$ZIP_CLASH
         BIN_KERNEL=$BIN_CLASH
+        _failcat "未检测到 mihomo 内核压缩包，回退使用 clash 内核压缩包"
+    }
+
+    [ -z "$ZIP_KERNEL" ] && {
+        local arch=$(uname -m)
+        _failcat "${ZIP_BASE_DIR}：未检测到可用的内核压缩包，开始下载默认 mihomo 内核"
+        ZIP_KERNEL=$(_download_mihomo "$arch" "$MIHOMO_DEFAULT_VERSION")
+        BIN_KERNEL=$BIN_MIHOMO
     }
 
     BIN_KERNEL_NAME=$(basename "$BIN_KERNEL")
@@ -472,6 +474,136 @@ _download_clash() {
         "$url"
     echo $sha256sum "$clash_zip" | sha256sum -c ||
         _error_quit "下载失败：请自行下载对应版本至 ${ZIP_BASE_DIR} 目录下：https://downloads.clash.wiki/ClashPremium/"
+}
+
+_map_mihomo_arch() {
+    case "$1" in
+    x86_64)
+        echo "linux-amd64-compatible"
+        ;;
+    aarch64 | arm64)
+        echo "linux-arm64"
+        ;;
+    *)
+        return 1
+        ;;
+    esac
+}
+
+_get_latest_mihomo_version() {
+    local tag
+    tag=$(
+        curl --silent --show-error --fail \
+            "https://api.github.com/repos/${MIHOMO_REPO}/releases/latest" 2>/dev/null |
+            sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' |
+            head -n1
+    ) || true
+
+    if [ -n "$tag" ]; then
+        echo "$tag"
+    else
+        echo "$MIHOMO_DEFAULT_VERSION"
+    fi
+}
+
+_normalize_mihomo_version() {
+    local version=${1:-latest}
+    case "$version" in
+    "" | latest | stable)
+        _get_latest_mihomo_version
+        ;;
+    v*)
+        echo "$version"
+        ;;
+    *)
+        echo "v$version"
+        ;;
+    esac
+}
+
+_build_mihomo_asset_name() {
+    local arch_label=$1
+    local version=$2
+    echo "mihomo-${arch_label}-${version}.gz"
+}
+
+_download_mihomo() {
+    local arch=$1
+    local requested_version=${2:-latest}
+    local arch_label version asset_name url proxy_url dest
+
+    arch_label=$(_map_mihomo_arch "$arch") || {
+        _error_quit "未知的 mihomo 架构版本：$arch，请手动下载后放到 ${ZIP_BASE_DIR} 目录"
+    }
+    version=$(_normalize_mihomo_version "$requested_version")
+    asset_name=$(_build_mihomo_asset_name "$arch_label" "$version")
+    url="https://github.com/${MIHOMO_REPO}/releases/download/${version}/${asset_name}"
+    proxy_url="${URL_GH_PROXY}/${url}"
+    dest="${ZIP_BASE_DIR}/${asset_name}"
+
+    mkdir -p "$ZIP_BASE_DIR"
+
+    _okcat '⏳' "正在下载：mihomo ${version} (${arch_label})..."
+    if curl \
+        --progress-bar \
+        --show-error \
+        --fail \
+        --location \
+        --connect-timeout 15 \
+        --retry 2 \
+        --output "$dest" \
+        "$proxy_url"; then
+        echo "$dest"
+        return 0
+    fi
+
+    _okcat '🌐' "代理下载失败，尝试直连..."
+    if curl \
+        --progress-bar \
+        --show-error \
+        --fail \
+        --location \
+        --connect-timeout 15 \
+        --retry 2 \
+        --output "$dest" \
+        "$url"; then
+        echo "$dest"
+        return 0
+    fi
+
+    rm -f "$dest"
+    _error_quit "下载 mihomo 失败：${url}"
+}
+
+_extract_gzip_binary() {
+    local src_gz=$1
+    local dest_bin=$2
+
+    mkdir -p "$(dirname "$dest_bin")"
+    gzip -dc "$src_gz" > "$dest_bin" || return 1
+    chmod +x "$dest_bin"
+}
+
+_replace_installed_mihomo() {
+    local src_gz=$1
+    local target_bin="${MIHOMO_BASE_DIR}/bin/mihomo"
+    local backup_bin=""
+    local version_label
+    version_label=$(_normalize_mihomo_version "${2:-latest}")
+
+    [ -x "$target_bin" ] && {
+        backup_bin="${target_bin}.bak.${version_label}.$(date +%Y%m%d%H%M%S)"
+        cp -p "$target_bin" "$backup_bin"
+    }
+
+    _extract_gzip_binary "$src_gz" "$target_bin" || {
+        [ -n "$backup_bin" ] && cp -p "$backup_bin" "$target_bin" 2>/dev/null || true
+        _failcat "mihomo 内核替换失败"
+        return 1
+    }
+
+    _set_bin
+    return 0
 }
 
 _download_raw_config() {

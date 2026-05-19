@@ -171,6 +171,47 @@ function clashrestart() {
     { clashoff && clashon; } >&/dev/null && _okcat "代理服务重启成功"
 }
 
+_mihomo_api_headers() {
+    local runtime_file=${1:-$MIHOMO_CONFIG_RUNTIME}
+    local secret
+    secret=$("$BIN_YQ" '.secret // ""' "$runtime_file" 2>/dev/null)
+    printf '%s\n' "-H" "Content-Type: application/json"
+    [ -n "$secret" ] && printf '%s\n' "-H" "Authorization: Bearer ${secret}"
+}
+
+function clashreload() {
+    if ! is_mihomo_running; then
+        _failcat "mihomo 进程未运行，改为直接启动"
+        clashon
+        return $?
+    fi
+
+    _valid_config "$MIHOMO_CONFIG_RUNTIME" || {
+        _failcat "运行时配置校验失败，无法 reload"
+        return 1
+    }
+
+    _get_ui_port
+    local endpoint="http://127.0.0.1:${UI_PORT}/configs?force=true"
+    local headers=()
+    while IFS= read -r header; do
+        headers+=("$header")
+    done < <(_mihomo_api_headers)
+
+    if curl --silent --show-error --fail \
+        "${headers[@]}" \
+        --request PUT \
+        --data "{\"path\":\"runtime.yaml\"}" \
+        "$endpoint" >/dev/null; then
+        _verify_actual_ports
+        _okcat "配置热重载成功"
+        return 0
+    fi
+
+    _failcat "API reload 失败，回退到 restart"
+    clashrestart
+}
+
 function clashproxy() {
     case "$1" in
     on)
@@ -324,7 +365,10 @@ function clashstatus() {
     if is_mihomo_running; then
         local pid=$(cat "$pid_file" 2>/dev/null)
         local uptime=$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')
+        local kernel_version=""
+        [ -x "$BIN_MIHOMO" ] && kernel_version=$("$BIN_MIHOMO" -v 2>/dev/null | head -n1)
         _okcat "mihomo 进程状态: 运行中"
+        [ -n "$kernel_version" ] && _okcat "内核版本: $kernel_version"
         _okcat "进程 PID: $pid"
         _okcat "运行时间: ${uptime:-未知}"
         _okcat "配置文件: $MIHOMO_CONFIG_RUNTIME"
@@ -705,6 +749,96 @@ function clashupdate() {
     echo "[$(date +"%Y-%m-%d %H:%M:%S")] 订阅更新成功：$url" >> "${MIHOMO_UPDATE_LOG}"
 }
 
+function clashmihomo() {
+    local action=$1
+    shift || true
+
+    case "$action" in
+    "" | version)
+        if [ -x "$BIN_MIHOMO" ]; then
+            "$BIN_MIHOMO" -v
+        else
+            _failcat "未找到已安装的 mihomo 内核: $BIN_MIHOMO"
+            return 1
+        fi
+        ;;
+    update)
+        local arch version url restart_after=true was_running=false downloaded
+        arch=$(uname -m)
+        version="latest"
+        url=""
+
+        while [ $# -gt 0 ]; do
+            case "$1" in
+            --version)
+                version=$2
+                shift 2
+                ;;
+            --url)
+                url=$2
+                shift 2
+                ;;
+            --no-restart)
+                restart_after=false
+                shift
+                ;;
+            http://* | https://*)
+                url=$1
+                shift
+                ;;
+            *)
+                version=$1
+                shift
+                ;;
+            esac
+        done
+
+        mkdir -p "$ZIP_BASE_DIR"
+
+        if [ -n "$url" ]; then
+            downloaded="${ZIP_BASE_DIR}/$(basename "$url")"
+            _okcat "正在下载自定义 mihomo 内核..."
+            curl --progress-bar --show-error --fail --location --connect-timeout 15 --retry 2 \
+                --output "$downloaded" "$url" || {
+                rm -f "$downloaded"
+                _failcat "自定义 mihomo 下载失败"
+                return 1
+            }
+        else
+            version=$(_normalize_mihomo_version "$version")
+            downloaded=$(_download_mihomo "$arch" "$version") || return 1
+        fi
+
+        is_mihomo_running && was_running=true
+        _replace_installed_mihomo "$downloaded" "$version" || return 1
+
+        if [ -x "$BIN_MIHOMO" ]; then
+            _okcat "当前 mihomo 版本：$("$BIN_MIHOMO" -v | head -n1)"
+        fi
+
+        if [ "$was_running" = true ] && [ "$restart_after" = true ]; then
+            _okcat "检测到 mihomo 正在运行，正在重启以应用新内核..."
+            clashrestart || return 1
+        fi
+
+        _okcat "mihomo 内核更新完成"
+        ;;
+    help | -h | --help)
+        cat <<EOF
+用法: clash mihomo [version|update]
+    version                         查看当前 mihomo 内核版本
+    update [latest|vX.Y.Z]          更新到指定或最新 mihomo 版本
+    update --url URL                从自定义下载地址更新 mihomo
+    update --no-restart             替换内核后不自动重启
+EOF
+        ;;
+    *)
+        _failcat "未知的 mihomo 子命令: $action"
+        return 1
+        ;;
+    esac
+}
+
 function clashmixin() {
     case "$1" in
     -e)
@@ -728,6 +862,9 @@ function clashctl() {
         ;;
     off)
         clashoff
+        ;;
+    reload)
+        clashreload
         ;;
     restart)
         clashrestart
@@ -771,6 +908,10 @@ function clashctl() {
         shift
         clashupdate "$@"
         ;;
+    mihomo)
+        shift
+        clashmihomo "$@"
+        ;;
     tui)
         clashtui
         ;;
@@ -785,6 +926,7 @@ Usage:
 Commands:
     on                      开启代理
     off                     关闭代理
+    reload                  热重载配置
     restart                 重启代理服务
     status                  进程运行状态
     tui                     交互式终端界面（TUI）
@@ -797,6 +939,7 @@ Commands:
     secret   [SECRET]       Web 控制台密钥
     subscribe [URL]         设置或查看订阅地址
     update   [auto|log]     更新订阅配置
+    mihomo   [version|update] 管理 mihomo 内核
 
 说明:
     • 用户空间运行，无需 sudo 权限
